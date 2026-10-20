@@ -20,6 +20,9 @@ struct CILocalApp: App {
             AddRepoView(model: model)
         }
         .windowResizability(.contentSize)
+        Window("Backups & connections", id: "backups") {
+            BackupView(backup: model.backup)
+        }
     }
 }
 
@@ -27,6 +30,8 @@ struct CILocalApp: App {
 final class AppModel: ObservableObject {
     @Published var runners: [RunnerManager] = []
     @Published var launchAtLogin = SMAppService.mainApp.status == .enabled
+    /// GitHub + Google Drive backups; also runs the daily schedule while the app is open.
+    let backup = BackupManager()
     private var observers: [Any] = []
 
     init() {
@@ -119,6 +124,10 @@ struct MenuView: View {
         Button("Add repository…") {
             NSApp.activate(ignoringOtherApps: true)
             openWindow(id: "add-repo")
+        }
+        Button("Backups & connections…") {
+            NSApp.activate(ignoringOtherApps: true)
+            openWindow(id: "backups")
         }
         Toggle("Launch at login", isOn: Binding(
             get: { model.launchAtLogin },
