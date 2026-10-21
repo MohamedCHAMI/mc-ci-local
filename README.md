@@ -132,3 +132,7 @@ Database dumps restore with `pg_restore --no-owner -d <database-url> database.du
 - Self-hosted runners execute workflow code on your Mac. Use them only for **private repositories you own**: never for forks or public repos, where anyone could open a pull request that runs code on your machine.
 - Backups are encrypted before they leave the Mac; your storage provider only ever sees ciphertext.
 - Secrets are read from files and never stored in the app's settings or logs.
+
+## License
+
+[MIT](LICENSE)
