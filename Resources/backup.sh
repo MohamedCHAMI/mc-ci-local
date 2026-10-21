@@ -1,5 +1,6 @@
 #!/bin/bash
-# CI Local backup: encrypted, versioned restic snapshots in a Google Drive folder.
+# CI Local backup: encrypted, versioned restic snapshots in a synced folder
+# (Google Drive, iCloud, Dropbox, OneDrive, a disk…) or directly on cloud storage.
 #
 #   backup.sh                 full backup (GitHub mirrors, database dump, folders)
 #   backup.sh --paths DIR...  back up just these paths (e.g. CI release artifacts), tag "ci"
@@ -21,10 +22,13 @@ echo "=== $(date '+%Y-%m-%d %H:%M:%S') backup $*"
 
 # Defaults, overridden by the settings file.
 DRIVE_DIR=""
+REPO_URL=""          # restic repository on cloud storage (s3:, b2:, azure:, gs:, sftp:, rest:, rclone:)
+CLOUD_ENV_FILE="$HOME/.secrets/backup-cloud.env"
 GITHUB_ENABLED=0
 GITHUB_OWNER=""
-DB_ENV_FILE="$HOME/.secrets/chessvox-db-backup.env"
+DB_ENV_FILE="$HOME/.secrets/database-backup.env"
 EXTRA_PATHS=""
+GIT_REMOTES=""
 SCAN_DIR=""
 PASSWORD_FILE="$HOME/.secrets/restic-backup.pass"
 KEEP="--keep-daily 7 --keep-weekly 4 --keep-monthly 6"
@@ -58,18 +62,25 @@ fail() {
   exit 1
 }
 
-[ -n "$DRIVE_DIR" ] || fail "no Google Drive folder chosen in CI Local → Backups"
-[ -d "$(dirname "$DRIVE_DIR")" ] || fail "Google Drive is not mounted ($(dirname "$DRIVE_DIR")). Open Google Drive for desktop."
 [ -s "$PASSWORD_FILE" ] || fail "encryption password file missing: $PASSWORD_FILE"
 command -v restic >/dev/null || fail "restic is not installed (brew install restic)"
-
-export RESTIC_REPOSITORY="$DRIVE_DIR/restic"
 export RESTIC_PASSWORD_FILE="$PASSWORD_FILE"
 
 STEP="open repository"
-if [ ! -f "$RESTIC_REPOSITORY/config" ]; then
-  mkdir -p "$DRIVE_DIR" || fail "cannot create $DRIVE_DIR"
-  restic init || fail "restic init failed"
+if [ -n "$REPO_URL" ]; then
+  # Direct cloud storage: credentials (AWS_*, B2_*, AZURE_*, GOOGLE_*, RCLONE_*) come from a secrets file.
+  # shellcheck source=/dev/null
+  [ -f "$CLOUD_ENV_FILE" ] && { set -a; . "$CLOUD_ENV_FILE"; set +a; }
+  export RESTIC_REPOSITORY="$REPO_URL"
+  restic cat config >/dev/null 2>&1 || restic init || fail "cannot open or create $REPO_URL (check $CLOUD_ENV_FILE)"
+else
+  [ -n "$DRIVE_DIR" ] || fail "no backup destination chosen in CI Local → Backups"
+  [ -d "$(dirname "$DRIVE_DIR")" ] || fail "backup folder is not available ($(dirname "$DRIVE_DIR")). Open your sync app or connect the disk."
+  export RESTIC_REPOSITORY="$DRIVE_DIR/restic"
+  if [ ! -f "$RESTIC_REPOSITORY/config" ]; then
+    mkdir -p "$DRIVE_DIR" || fail "cannot create $DRIVE_DIR"
+    restic init || fail "restic init failed"
+  fi
 fi
 
 if [ "${1:-}" = "--paths" ]; then
@@ -100,6 +111,24 @@ if [ "$GITHUB_ENABLED" = "1" ]; then
       gh repo clone "$r" "$dest" -- --mirror >/dev/null 2>&1 || WARNINGS+=("mirror clone failed: $r")
     fi
   done
+fi
+
+# 1b. Any other Git host: mirror each clone URL with this Mac's own Git credentials.
+if [ -n "$GIT_REMOTES" ]; then
+  STEP="mirror Git remotes"
+  while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    case "$url" in -*) WARNINGS+=("skipped suspicious URL: $url"); continue ;; esac
+    # https://host/a/b.git, ssh://git@host/a/b.git, git@host:a/b.git -> host/a/b.git
+    rel=$(printf '%s' "$url" | sed -E 's#^[a-z]+://##; s#^[^@/]+@##; s#:#/#; s#\.git$##').git
+    dest="$STAGING/git/$rel"
+    if [ -d "$dest" ]; then
+      GIT_TERMINAL_PROMPT=0 git -C "$dest" remote update --prune >/dev/null 2>&1 || WARNINGS+=("mirror update failed: $url")
+    else
+      mkdir -p "$(dirname "$dest")"
+      GIT_TERMINAL_PROMPT=0 git clone --mirror -- "$url" "$dest" >/dev/null 2>&1 || WARNINGS+=("mirror clone failed: $url")
+    fi
+  done <<<"$GIT_REMOTES"
 fi
 
 # 2. Database: custom-format pg_dump (needs pg_dump >= the server's major version).
@@ -133,6 +162,7 @@ while IFS= read -r p; do
   [ -n "$p" ] && { [ -e "$p" ] && echo "$p" >>"$LIST" || WARNINGS+=("folder not found: $p"); }
 done <<<"$EXTRA_PATHS"
 echo "$STAGING/github" >>"$LIST"
+echo "$STAGING/git" >>"$LIST"
 echo "$STAGING/db" >>"$LIST"
 
 STEP="upload snapshot"
