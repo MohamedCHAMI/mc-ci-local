@@ -21,6 +21,11 @@ final class RunnerManager: ObservableObject, Identifiable {
     @Published private(set) var mergedBranches: Set<String> = []
 
     private var process: Process?
+    /// True after Start, false after Stop. While true, a runner that dies on its own (crash, SIGTERM,
+    /// stopped from outside) is started again by `refresh`, so queued checks never wait on a dead runner.
+    private var wantRunning = false
+    private var lastLaunch = Date.distantPast
+    private var relaunches = 0
     private var timer: Timer?
     private var mergedCheckedAt = Date.distantPast
     /// Re-run ids already retried, so a run that keeps losing the runner is not retried forever.
@@ -57,6 +62,8 @@ final class RunnerManager: ObservableObject, Identifiable {
     }
 
     func start() {
+        wantRunning = true
+        relaunches = 0
         Task {
             if await isRunningLocally() { await refresh(); return }
             launch()
@@ -82,6 +89,7 @@ final class RunnerManager: ObservableObject, Identifiable {
         p.terminationHandler = { [weak self] _ in
             Task { @MainActor in await self?.refresh() }
         }
+        lastLaunch = Date()
         do {
             try p.run()
             process = p
@@ -94,6 +102,7 @@ final class RunnerManager: ObservableObject, Identifiable {
     }
 
     func stop() {
+        wantRunning = false
         // Listener runs as a grandchild of run.sh; SIGINT lets it deregister the session cleanly.
         let dir = config.dir
         Task.detached { _ = Shell.run("/usr/bin/pkill", ["-INT", "-f", "\(dir)/bin/Runner.Listener"]) }
@@ -131,8 +140,23 @@ final class RunnerManager: ObservableObject, Identifiable {
             await rerunLostRunnerJobs()
         case (true, _): state = .starting; message = online == nil ? "Running (GitHub status unavailable)" : "Starting…"
         case (false, true?): state = .orphaned; message = "Online elsewhere"
-        default: state = .stopped; message = "Stopped"
+        default:
+            state = .stopped; message = "Stopped"
+            keepAlive()
         }
+    }
+
+    /// Starts the runner again when it died without a Stop. Waits 30 s, then doubles the wait up to
+    /// 10 min after repeated deaths; a runner that stays up for 10 min resets the back-off.
+    private func keepAlive() {
+        guard wantRunning else { return }
+        if Date().timeIntervalSince(lastLaunch) > 600 { relaunches = 0 }
+        let wait = min(30.0 * pow(2.0, Double(relaunches)), 600)
+        guard Date().timeIntervalSince(lastLaunch) >= wait else { return }
+        relaunches += 1
+        process = nil
+        message = "Restarting (runner exited)…"
+        launch()
     }
 
     /// Re-reads merged PR branches at most every 5 minutes. Keeps the last good value on error.
